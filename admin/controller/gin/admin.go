@@ -1,52 +1,88 @@
 /*
  * Revision History:
- *     Initial: 2019/03/14        Yang ChengKai
+ *     Initial: 2020/10/05        Abserari
  */
 
 package controller
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 
-	mysql "github.com/fengyfei/comet/admin/model/mysql"
+	jwt "github.com/appleboy/gin-jwt/v2"
+
+	"github.com/abserari/pet/admin/model/mysql"
 	"github.com/gin-gonic/gin"
+)
+
+var (
+	// default user
+	name     = "Admin"
+	password = "111111"
+
+	errActive          = errors.New("the admin is not activated")
+	errUserIDNotExists = errors.New("Get Admin ID is not exists")
+	errUserIDNotValid  = func(value interface{}) error {
+		return errors.New(fmt.Sprintf("Get Admin ID is not valid. Is %s", value))
+	}
 )
 
 // Controller external service interface
 type Controller struct {
-	db *sql.DB
+	db  *sql.DB
+	JWT *jwt.GinJWTMiddleware
 }
 
 // New create an external service interface
 func New(db *sql.DB) *Controller {
-	return &Controller{
+	c := &Controller{
 		db: db,
 	}
+	var err error
+	c.JWT, err = c.newJWTMiddleware()
+	if err != nil {
+		log.Fatal(err)
+	}
+	return c
 }
 
-// RegisterRouter register router
-func (c *Controller) RegisterRouter(r gin.IRouter) {
+// RegisterRouter register router. It fatal because there is no service if register failed.
+func (con *Controller) RegisterRouter(r gin.IRouter) {
 	if r == nil {
 		log.Fatal("[InitRouter]: server is nil")
 	}
-
-	name := "Admin"
-	password := "111111"
-	err := mysql.CreateTable(c.db, &name, &password)
+	err := mysql.CreateDatabase(con.db)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	r.POST("/create", c.create)
-	r.POST("/modify/email", c.modifyEmail)
-	r.POST("/modify/mobile", c.modifyMobile)
-	r.POST("/modify/password", c.modifyPassword)
-	r.POST("/modify/active", c.modifyAdminActive)
+	err = mysql.CreateTable(con.db, &name, &password)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// login and refresh token.
+	r.POST("/login", con.JWT.LoginHandler)
+	r.GET("/refresh_token", con.JWT.RefreshHandler)
+
+	// Promise to start admin in this router group.
+	// start to add token on every API after admin.RegisterRouter
+	r.Use(con.JWT.MiddlewareFunc())
+	// start to check the user active every time.
+	r.Use(con.CheckActive())
+
+	// admin crud API
+	r.POST("/create", con.create)
+	r.POST("/modify/email", con.modifyEmail)
+	r.POST("/modify/mobile", con.modifyMobile)
+	r.POST("/modify/password", con.modifyPassword)
+	r.POST("/modify/active", con.modifyAdminActive)
 }
 
-func (c *Controller) create(ctx *gin.Context) {
+func (con *Controller) create(ctx *gin.Context) {
 	var (
 		admin struct {
 			Name     string `json:"name"      binding:"required,alphanum,min=5,max=30"`
@@ -66,7 +102,7 @@ func (c *Controller) create(ctx *gin.Context) {
 		admin.Password = "111111"
 	}
 
-	err = mysql.Create(c.db, &admin.Name, &admin.Password)
+	err = mysql.CreateAdmin(con.db, &admin.Name, &admin.Password)
 	if err != nil {
 		ctx.Error(err)
 		ctx.JSON(http.StatusBadGateway, gin.H{"status": http.StatusBadGateway})
@@ -76,7 +112,7 @@ func (c *Controller) create(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"status": http.StatusOK})
 }
 
-func (c *Controller) modifyEmail(ctx *gin.Context) {
+func (con *Controller) modifyEmail(ctx *gin.Context) {
 	var (
 		admin struct {
 			AdminID uint32 `json:"admin_id"    binding:"required"`
@@ -91,7 +127,7 @@ func (c *Controller) modifyEmail(ctx *gin.Context) {
 		return
 	}
 
-	err = mysql.ModifyEmail(c.db, admin.AdminID, &admin.Email)
+	err = mysql.ModifyEmail(con.db, admin.AdminID, &admin.Email)
 	if err != nil {
 		ctx.Error(err)
 		ctx.JSON(http.StatusBadGateway, gin.H{"status": http.StatusBadGateway})
@@ -101,7 +137,7 @@ func (c *Controller) modifyEmail(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"status": http.StatusOK})
 }
 
-func (c *Controller) modifyMobile(ctx *gin.Context) {
+func (con *Controller) modifyMobile(ctx *gin.Context) {
 	var (
 		admin struct {
 			AdminID uint32 `json:"admin_id"     binding:"required"`
@@ -116,7 +152,7 @@ func (c *Controller) modifyMobile(ctx *gin.Context) {
 		return
 	}
 
-	err = mysql.ModifyMobile(c.db, admin.AdminID, &admin.Mobile)
+	err = mysql.ModifyMobile(con.db, admin.AdminID, &admin.Mobile)
 	if err != nil {
 		ctx.Error(err)
 		ctx.JSON(http.StatusBadGateway, gin.H{"status": http.StatusBadGateway})
@@ -126,7 +162,7 @@ func (c *Controller) modifyMobile(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"status": http.StatusOK})
 }
 
-func (c *Controller) modifyPassword(ctx *gin.Context) {
+func (con *Controller) modifyPassword(ctx *gin.Context) {
 	var (
 		admin struct {
 			AdminID     uint32 `json:"admin_id"       binding:"required"`
@@ -155,7 +191,7 @@ func (c *Controller) modifyPassword(ctx *gin.Context) {
 		return
 	}
 
-	err = mysql.ModifyPassword(c.db, admin.AdminID, &admin.Password, &admin.NewPassword)
+	err = mysql.ModifyPassword(con.db, admin.AdminID, &admin.Password, &admin.NewPassword)
 	if err != nil {
 		ctx.Error(err)
 		ctx.JSON(http.StatusBadGateway, gin.H{"status": http.StatusBadGateway})
@@ -165,7 +201,7 @@ func (c *Controller) modifyPassword(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"status": http.StatusOK})
 }
 
-func (c *Controller) modifyAdminActive(ctx *gin.Context) {
+func (con *Controller) modifyAdminActive(ctx *gin.Context) {
 	var (
 		admin struct {
 			CheckID     uint32 `json:"check_id"    binding:"required"`
@@ -180,7 +216,7 @@ func (c *Controller) modifyAdminActive(ctx *gin.Context) {
 		return
 	}
 
-	err = mysql.ModifyAdminActive(c.db, admin.CheckID, admin.CheckActive)
+	err = mysql.ModifyAdminActive(con.db, admin.CheckID, admin.CheckActive)
 	if err != nil {
 		ctx.Error(err)
 		ctx.JSON(http.StatusBadGateway, gin.H{"status": http.StatusBadGateway})
@@ -191,7 +227,7 @@ func (c *Controller) modifyAdminActive(ctx *gin.Context) {
 }
 
 //Login JWT validation
-func (c *Controller) Login(ctx *gin.Context) (uint32, error) {
+func (con *Controller) Login(ctx *gin.Context) (uint32, error) {
 	var (
 		admin struct {
 			Name     string `json:"name"      binding:"required,alphanum,min=5,max=30"`
@@ -204,7 +240,7 @@ func (c *Controller) Login(ctx *gin.Context) (uint32, error) {
 		return 0, err
 	}
 
-	ID, err := mysql.Login(c.db, &admin.Name, &admin.Password)
+	ID, err := mysql.Login(con.db, &admin.Name, &admin.Password)
 	if err != nil {
 		return 0, err
 	}
